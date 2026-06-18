@@ -28,7 +28,7 @@ class AthenaValidator:
         df = pd.concat([df, pd.DataFrame([new_pred])], ignore_index=True)
         df.to_csv(self.log_path, index=False)
 
-    def validate_yesterday(self, current_prices):
+    def validate_yesterday(self, current_prices, min_age_hours=20):
         """
         Mengecek prediksi lama apakah 'Hit' atau 'Miss'
         current_prices: dict { 'BTC/USDT': 62000, ... }
@@ -36,8 +36,8 @@ class AthenaValidator:
         df = pd.read_csv(self.log_path)
         df['is_validated'] = df['is_validated'].astype(str).str.lower().isin(['true', '1'])
         
-        # Cari yang belum divalidasi dan sudah lebih dari 20 jam
-        mask = (~df['is_validated']) & (pd.to_datetime(df['timestamp']) < datetime.now() - timedelta(hours=20))
+        # Cari yang belum divalidasi dan sudah melewati horizon prediksi.
+        mask = (~df['is_validated']) & (pd.to_datetime(df['timestamp']) < datetime.now() - timedelta(hours=min_age_hours))
         
         hits = 0
         total_validated = 0

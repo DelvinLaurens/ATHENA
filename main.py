@@ -11,13 +11,16 @@ import os
 
 BTC_SYMBOL = 'BTC/USDT'
 DOMINANCE_SYMBOL = 'BTCDOMUSDT'
+SCAN_TIMEFRAME = '4h'
+VALIDATION_HOURS = 4
+DATA_FOLDER = os.path.join('data', 'raw', SCAN_TIMEFRAME)
 
 def run_athena():
     print("🏛 ATHENA v0.6 - Performance Tracking Engine Starting...")
     
     provider = BinanceProvider()
     brain = AthenaBrain()
-    artemis = Artemis()
+    artemis = Artemis(data_folder=DATA_FOLDER)
     aegis = Aegis()
     hermes = Hermes()
     validator = AthenaValidator()
@@ -31,24 +34,24 @@ def run_athena():
             watch_list.append(s)
 
     # 2. Sync Data
-    print("📥 Syncing Historical Data...")
+    print(f"Syncing Historical Data ({SCAN_TIMEFRAME} Timeframe)...")
     current_prices = {}
     for s in watch_list:
-        data = provider.fetch_ohlcv(s, timeframe='1d', limit=1000)
-        provider.save_to_csv(data, s)
+        data = provider.fetch_ohlcv(s, timeframe=SCAN_TIMEFRAME, limit=1000)
+        provider.save_to_csv(data, s, data_folder=DATA_FOLDER)
         # Simpan harga terakhir untuk validasi
         if data is not None:
             current_prices[s] = data['close'].iloc[-1]
         time.sleep(0.05)
         
     # 3. Validasi Hasil Kemarin & Hitung Win Rate
-    hits, total = validator.validate_yesterday(current_prices)
+    hits, total = validator.validate_yesterday(current_prices, min_age_hours=VALIDATION_HOURS)
     win_rate = validator.get_win_rate(days=7)
     print(f"📊 Validation: {hits}/{total} Hits. 7-Day Win Rate: {win_rate}%")
 
     # 4. Market Context (Apollo)
-    btc_path = 'data/raw/BTC_USDT.csv'
-    dom_path = 'data/raw/BTCDOMUSDT.csv'
+    btc_path = os.path.join(DATA_FOLDER, 'BTC_USDT.csv')
+    dom_path = os.path.join(DATA_FOLDER, 'BTCDOMUSDT.csv')
 
     if not os.path.exists(btc_path):
         print("BTC data tidak tersedia. Kemungkinan fetch Binance gagal di runner GitHub.")
@@ -70,7 +73,7 @@ def run_athena():
             continue
         
         try:
-            csv_path = f"data/raw/{symbol.replace('/', '_')}.csv"
+            csv_path = os.path.join(DATA_FOLDER, f"{symbol.replace('/', '_')}.csv")
             score_data = artemis.calculate_score(symbol)
             
             # AI Prediction
@@ -117,7 +120,7 @@ def run_athena():
     # Kirim ke Discord
     payload = {
         "username": "ATHENA Intelligence",
-        "content": f"🏛 **ATHENA DAILY INTELLIGENCE REPORT**\n"
+        "content": f"🏛 **ATHENA 4H INTELLIGENCE REPORT**\n"
                    f"Market: **{market_status}**\n"
                    f"📈 **AI 7-Day Win Rate: {win_rate}%**",
         "embeds": [
@@ -132,7 +135,7 @@ def run_athena():
                 "color": 0xff0000
             }
         ],
-        "footer": {"text": "ATHENA Engine v0.6 | Data-Driven Intelligence"}
+        "footer": {"text": "ATHENA Engine v0.6 | 4H Data-Driven Intelligence"}
     }
     
     if not hermes.webhook_url:

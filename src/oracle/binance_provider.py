@@ -53,13 +53,12 @@ class BinanceProvider:
             return None
 
     # --- UPDATE FUNGSI SAVE AGAR INCREMENTAL ---
-    def save_to_csv(self, df, symbol):
+    def save_to_csv(self, df, symbol, data_folder='data/raw'):
         if df is not None and not df.empty:
-            if not os.path.exists('data/raw'):
-                os.makedirs('data/raw')
+            os.makedirs(data_folder, exist_ok=True)
             
             safe_symbol = symbol.replace('/', '_')
-            filename = f"data/raw/{safe_symbol}.csv"
+            filename = os.path.join(data_folder, f"{safe_symbol}.csv")
             
             # Jika file sudah ada, kita gabungkan (append)
             if os.path.exists(filename):
