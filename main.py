@@ -49,6 +49,12 @@ def run_athena():
     # 4. Market Context (Apollo)
     btc_path = 'data/raw/BTC_USDT.csv'
     dom_path = 'data/raw/BTCDOMUSDT.csv'
+
+    if not os.path.exists(btc_path):
+        print("BTC data tidak tersedia. Kemungkinan fetch Binance gagal di runner GitHub.")
+        print("ATHENA berhenti tanpa mengirim report agar workflow tidak crash.")
+        return
+
     if not os.path.exists(dom_path):
         print("BTC dominance data tidak tersedia. ATHENA lanjut tanpa fitur dominance.")
         dom_path = None
