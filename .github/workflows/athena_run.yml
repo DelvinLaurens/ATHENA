@@ -1,0 +1,38 @@
+name: ATHENA Daily Scan
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Jalan otomatis setiap jam 7 Pagi WIB
+  workflow_dispatch:      # Tombol manual
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Izin untuk mengupdate file log
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ATHENA
+        env:
+          BINANCE_API_KEY: ${{ secrets.BINANCE_API_KEY }}
+          BINANCE_SECRET_KEY: ${{ secrets.BINANCE_SECRET_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python main.py
+
+      - name: Save Logs and Data
+        run: |
+          git config --global user.name "Athena-Bot"
+          git config --global user.email "athena@bot.com"
+          git add data/predictions_log.csv
+          git commit -m "Update predictions log [skip ci]" || echo "No changes"
+          git push
