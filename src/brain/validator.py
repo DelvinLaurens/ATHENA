@@ -5,6 +5,10 @@ from datetime import datetime, timedelta
 class AthenaValidator:
     def __init__(self, log_path='data/predictions_log.csv'):
         self.log_path = log_path
+        log_dir = os.path.dirname(self.log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+
         # Buat file log jika belum ada
         if not os.path.exists(self.log_path):
             df = pd.DataFrame(columns=['timestamp', 'symbol', 'price_at_pred', 'ai_score', 'is_validated', 'result'])
@@ -30,7 +34,7 @@ class AthenaValidator:
         current_prices: dict { 'BTC/USDT': 62000, ... }
         """
         df = pd.read_csv(self.log_path)
-        df['is_validated'] = df['is_validated'].astype(bool)
+        df['is_validated'] = df['is_validated'].astype(str).str.lower().isin(['true', '1'])
         
         # Cari yang belum divalidasi dan sudah lebih dari 20 jam
         mask = (~df['is_validated']) & (pd.to_datetime(df['timestamp']) < datetime.now() - timedelta(hours=20))

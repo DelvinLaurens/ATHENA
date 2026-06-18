@@ -17,10 +17,12 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5 # Update ke v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
 
       - name: Run ATHENA
         env:
@@ -33,6 +35,10 @@ jobs:
         run: |
           git config --global user.name "Athena-Bot"
           git config --global user.email "athena@bot.com"
-          git add data/predictions_log.csv
-          git commit -m "Update predictions log [skip ci]" || echo "No changes to commit"
-          git push
+          if [ -f data/predictions_log.csv ]; then
+            git add data/predictions_log.csv
+            git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update predictions log [skip ci]"
+            git push
+          else
+            echo "No predictions log found"
+          fi

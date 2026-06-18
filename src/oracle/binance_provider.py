@@ -24,11 +24,12 @@ class BinanceProvider:
             
             usdt_pairs = []
             for symbol, data in tickers.items():
+                quote_volume = data.get('quoteVolume') or 0
                 if '/USDT' in symbol and all(x not in symbol for x in ['UP/', 'DOWN/', 'BEAR/', 'BULL/']):
-                    if symbol not in blacklist:
+                    if symbol not in blacklist and symbol.isascii() and quote_volume > 0:
                         usdt_pairs.append({
                             'symbol': symbol,
-                            'quoteVolume': data['quoteVolume']
+                            'quoteVolume': quote_volume
                         })
             
             sorted_pairs = sorted(usdt_pairs, key=lambda x: x['quoteVolume'], reverse=True)
@@ -41,6 +42,9 @@ class BinanceProvider:
     def fetch_ohlcv(self, symbol, timeframe='1d', limit=1000):
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            if not ohlcv:
+                return None
+
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
@@ -50,7 +54,7 @@ class BinanceProvider:
 
     # --- UPDATE FUNGSI SAVE AGAR INCREMENTAL ---
     def save_to_csv(self, df, symbol):
-        if df is not None:
+        if df is not None and not df.empty:
             if not os.path.exists('data/raw'):
                 os.makedirs('data/raw')
             

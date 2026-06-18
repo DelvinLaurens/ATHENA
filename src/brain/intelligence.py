@@ -2,12 +2,13 @@ import pandas as pd
 import pandas_ta as ta
 from xgboost import XGBClassifier
 import numpy as np
+import os
 
 class AthenaBrain:
     def __init__(self):
         self.model = XGBClassifier(n_estimators=100, max_depth=3, learning_rate=0.1)
 
-    def prepare_data(self, df, dom_df):
+    def prepare_data(self, df, dom_df=None):
         # 1. Feature Teknikal Koin
         df['RSI'] = ta.rsi(df['close'], length=14)
         df['SMA_20'] = ta.sma(df['close'], length=20)
@@ -15,12 +16,11 @@ class AthenaBrain:
         df['VOL_Change'] = df['volume'].pct_change()
         
         # 2. Feature Market Context (BTC Dominance)
-        # Hitung perubahan dominasi BTC (apakah BTC makin kuat atau lemah)
-        dom_df['dom_change'] = dom_df['close'].pct_change()
-        
-        # Gabungkan data berdasarkan timestamp agar sejajar
-        # Kita hanya ambil kolom 'timestamp' dan 'dom_change' dari data dominance
-        df = pd.merge(df, dom_df[['timestamp', 'dom_change']], on='timestamp', how='left')
+        if dom_df is not None:
+            dom_df['dom_change'] = dom_df['close'].pct_change()
+            df = pd.merge(df, dom_df[['timestamp', 'dom_change']], on='timestamp', how='left')
+        else:
+            df['dom_change'] = 0.0
         
         # Bersihkan data
         cols_to_fix = ['RSI', 'SMA_20', 'EMA_9', 'VOL_Change', 'dom_change']
@@ -32,14 +32,15 @@ class AthenaBrain:
         
         return df.dropna()
 
-    def train_and_predict(self, csv_path, dom_path):
+    def train_and_predict(self, csv_path, dom_path=None):
         try:
             df = pd.read_csv(csv_path)
-            dom_df = pd.read_csv(dom_path)
+            dom_df = pd.read_csv(dom_path) if dom_path and os.path.exists(dom_path) else None
             
             # Pastikan timestamp dalam format datetime
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            dom_df['timestamp'] = pd.to_datetime(dom_df['timestamp'])
+            if dom_df is not None:
+                dom_df['timestamp'] = pd.to_datetime(dom_df['timestamp'])
             
             processed_df = self.prepare_data(df, dom_df)
             

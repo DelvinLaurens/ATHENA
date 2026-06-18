@@ -9,6 +9,9 @@ import requests
 import time
 import os
 
+BTC_SYMBOL = 'BTC/USDT'
+DOMINANCE_SYMBOL = 'BTCDOMUSDT'
+
 def run_athena():
     print("🏛 ATHENA v0.6 - Performance Tracking Engine Starting...")
     
@@ -19,9 +22,9 @@ def run_athena():
     hermes = Hermes()
     validator = AthenaValidator()
 
-    # 1. Ambil List Koin & Tambahkan BTC Dominance
+    # 1. Ambil List Koin & Tambahkan Macro Symbol
     watch_list = provider.get_top_volume_coins(limit=50)
-    macro_symbols = ['BTC/USDT', 'BTCDOMUSDT'] 
+    macro_symbols = [BTC_SYMBOL]
     
     for s in macro_symbols:
         if s not in watch_list:
@@ -46,6 +49,10 @@ def run_athena():
     # 4. Market Context (Apollo)
     btc_path = 'data/raw/BTC_USDT.csv'
     dom_path = 'data/raw/BTCDOMUSDT.csv'
+    if not os.path.exists(dom_path):
+        print("BTC dominance data tidak tersedia. ATHENA lanjut tanpa fitur dominance.")
+        dom_path = None
+
     apollo = Apollo(btc_path, dom_path)
     market_status = apollo.analyze_trend()
     
@@ -53,7 +60,8 @@ def run_athena():
     print("🧠 Analyzing Market Context & Opportunities...")
     results = []
     for symbol in watch_list:
-        if symbol in macro_symbols: continue
+        if symbol in macro_symbols or symbol == DOMINANCE_SYMBOL:
+            continue
         
         try:
             csv_path = f"data/raw/{symbol.replace('/', '_')}.csv"
@@ -77,6 +85,10 @@ def run_athena():
         except Exception as e:
             print(f"⚠️ Error processing {symbol}: {e}")
             continue
+
+    if not results:
+        print("Tidak ada koin yang berhasil dianalisis. Report tidak dikirim.")
+        return
 
     # 6. Ranking
     top_opps = sorted(results, key=lambda x: x['ai_score'], reverse=True)[:10]
@@ -117,11 +129,18 @@ def run_athena():
         "footer": {"text": "ATHENA Engine v0.6 | Data-Driven Intelligence"}
     }
     
-    response = requests.post(hermes.webhook_url, json=payload)
-    if response.status_code == 204:
-        print(f"✅ Report Sent. Market: {market_status} | Win Rate: {win_rate}%")
-    else:
-        print(f"❌ Failed to send Discord report: {response.text}")
+    if not hermes.webhook_url:
+        print("DISCORD_WEBHOOK_URL belum diset. Report dibuat, tapi tidak dikirim.")
+        return
+
+    try:
+        response = requests.post(hermes.webhook_url, json=payload, timeout=30)
+        if response.status_code == 204:
+            print(f"✅ Report Sent. Market: {market_status} | Win Rate: {win_rate}%")
+        else:
+            print(f"❌ Failed to send Discord report: {response.text}")
+    except requests.RequestException as e:
+        print(f"❌ Failed to send Discord report: {e}")
 
 if __name__ == "__main__":
     run_athena()
