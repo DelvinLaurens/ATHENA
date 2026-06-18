@@ -2,20 +2,20 @@ name: ATHENA Daily Scan
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Jalan otomatis setiap jam 7 Pagi WIB
-  workflow_dispatch:      # Tombol manual
+    - cron: '0 0 * * *' 
+  workflow_dispatch:      
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Izin untuk mengupdate file log
+      contents: write # IZIN WAJIB UNTUK UPDATE LOG
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # Update ke v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # Update ke v5
         with:
           python-version: '3.12'
 
@@ -34,5 +34,5 @@ jobs:
           git config --global user.name "Athena-Bot"
           git config --global user.email "athena@bot.com"
           git add data/predictions_log.csv
-          git commit -m "Update predictions log [skip ci]" || echo "No changes"
+          git commit -m "Update predictions log [skip ci]" || echo "No changes to commit"
           git push
