@@ -1,7 +1,7 @@
 import os
 
-import ccxt
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 
 
@@ -19,92 +19,102 @@ class BinanceProvider:
     ]
 
     def __init__(self):
-        # ATHENA hanya butuh market data public. Jangan pasang API key di sini,
-        # karena ccxt bisa mencoba endpoint private Binance saat load market.
         self.endpoint_index = 0
-        self.exchange = self._create_exchange(self.PUBLIC_BASE_URLS[self.endpoint_index])
+        self.session = requests.Session()
 
-    def _create_exchange(self, public_base_url):
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'spot',
-                'fetchCurrencies': False,
-                'adjustForTimeDifference': True,
-            },
-        })
-        exchange.urls['api']['public'] = public_base_url
-        exchange.urls['api']['v1'] = public_base_url.replace('/api/v3', '/api/v1')
-        return exchange
+    def _request(self, path, params=None):
+        endpoint_order = list(range(self.endpoint_index, len(self.PUBLIC_BASE_URLS)))
+        endpoint_order += list(range(0, self.endpoint_index))
+        last_error = None
 
-    def _use_endpoint(self, index):
-        self.endpoint_index = index
-        self.exchange = self._create_exchange(self.PUBLIC_BASE_URLS[index])
-        print(f"Binance public endpoint: {self.PUBLIC_BASE_URLS[index]}")
+        for index in endpoint_order:
+            base_url = self.PUBLIC_BASE_URLS[index]
+            url = f"{base_url}{path}"
+            try:
+                response = self.session.get(url, params=params, timeout=20)
+                response.raise_for_status()
+                self.endpoint_index = index
+                return response.json()
+            except requests.RequestException as e:
+                last_error = e
+                print(f"Endpoint gagal: {url} -> {e}")
+
+        raise RuntimeError(f"Semua endpoint Binance public gagal. Error terakhir: {last_error}")
+
+    @staticmethod
+    def _to_binance_symbol(symbol):
+        return symbol.replace('/', '')
+
+    @staticmethod
+    def _to_slash_symbol(symbol):
+        if symbol.endswith('USDT'):
+            return f"{symbol[:-4]}/USDT"
+        return symbol
 
     def get_top_volume_coins(self, limit=50):
         print(f"Mencari {limit} koin paling ramai di market...")
-        for index, _ in enumerate(self.PUBLIC_BASE_URLS):
-            self._use_endpoint(index)
-            try:
-                tickers = self.exchange.fetch_tickers()
-                break
-            except Exception as e:
-                print(f"Gagal mengambil tickers dari endpoint ini: {e}")
-        else:
-            return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
-
         try:
-            blacklist = {
-                'EUR/USDT',
-                'GBP/USDT',
-                'USDC/USDT',
-                'FDUSD/USDT',
-                'TUSD/USDT',
-                'PAXG/USDT',
-                'XAUT/USDT',
-                'AEUR/USDT',
-            }
-
-            usdt_pairs = []
-            for symbol, data in tickers.items():
-                quote_volume = data.get('quoteVolume') or 0
-                is_leveraged = any(x in symbol for x in ['UP/', 'DOWN/', 'BEAR/', 'BULL/'])
-
-                if '/USDT' not in symbol or is_leveraged:
-                    continue
-                if symbol in blacklist or not symbol.isascii() or quote_volume <= 0:
-                    continue
-
-                usdt_pairs.append({
-                    'symbol': symbol,
-                    'quoteVolume': quote_volume,
-                })
-
-            sorted_pairs = sorted(usdt_pairs, key=lambda x: x['quoteVolume'], reverse=True)
-            return [pair['symbol'] for pair in sorted_pairs[:limit]]
+            tickers = self._request('/ticker/24hr')
         except Exception as e:
-            print(f"Gagal memproses tickers: {e}")
+            print(f"Gagal mengambil tickers: {e}")
             return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+
+        blacklist = {
+            'EURUSDT',
+            'GBPUSDT',
+            'USDCUSDT',
+            'FDUSDUSDT',
+            'TUSDUSDT',
+            'PAXGUSDT',
+            'XAUTUSDT',
+            'AEURUSDT',
+        }
+
+        usdt_pairs = []
+        for item in tickers:
+            symbol = item.get('symbol', '')
+            quote_volume = float(item.get('quoteVolume') or 0)
+            is_leveraged = any(token in symbol for token in ['UPUSDT', 'DOWNUSDT', 'BEARUSDT', 'BULLUSDT'])
+
+            if not symbol.endswith('USDT') or is_leveraged:
+                continue
+            if symbol in blacklist or not symbol.isascii() or quote_volume <= 0:
+                continue
+
+            usdt_pairs.append({
+                'symbol': self._to_slash_symbol(symbol),
+                'quoteVolume': quote_volume,
+            })
+
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: x['quoteVolume'], reverse=True)
+        return [pair['symbol'] for pair in sorted_pairs[:limit]]
 
     def fetch_ohlcv(self, symbol, timeframe='1d', limit=1000):
-        endpoint_order = list(range(self.endpoint_index, len(self.PUBLIC_BASE_URLS)))
-        endpoint_order += list(range(0, self.endpoint_index))
+        try:
+            klines = self._request('/klines', params={
+                'symbol': self._to_binance_symbol(symbol),
+                'interval': timeframe,
+                'limit': limit,
+            })
+        except Exception as e:
+            print(f"Error saat mengambil data {symbol}: {e}")
+            return None
 
-        for index in endpoint_order:
-            self._use_endpoint(index)
-            try:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-                if not ohlcv:
-                    return None
+        if not klines:
+            return None
 
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                return df
-            except Exception as e:
-                print(f"Error saat mengambil data {symbol} dari endpoint ini: {e}")
+        rows = []
+        for candle in klines:
+            rows.append({
+                'timestamp': pd.to_datetime(candle[0], unit='ms'),
+                'open': float(candle[1]),
+                'high': float(candle[2]),
+                'low': float(candle[3]),
+                'close': float(candle[4]),
+                'volume': float(candle[5]),
+            })
 
-        return None
+        return pd.DataFrame(rows)
 
     def save_to_csv(self, df, symbol, data_folder='data/raw'):
         if df is None or df.empty:
