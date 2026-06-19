@@ -17,38 +17,39 @@ DOMINANCE_SYMBOL = 'BTCDOMUSDT'
 SCAN_TIMEFRAME = '4h'
 VALIDATION_HOURS = 4
 DATA_FOLDER = os.path.join('data', 'raw', SCAN_TIMEFRAME)
+LOCAL_REPORT_PATH = os.path.join('data', 'latest_report.md')
 
 
-def direction_icon(change_pct):
-    return "🟢" if change_pct >= 0 else "🔴"
+def direction_label(change_pct):
+    return "UP" if change_pct >= 0 else "DOWN"
 
 
-def ai_icon(ai_score):
+def ai_label(ai_score):
     if ai_score >= 70:
-        return "🚀"
+        return "STRONG"
     if ai_score >= 55:
-        return "🟢"
+        return "BULL"
     if ai_score >= 45:
-        return "⚪"
-    return "🧊"
+        return "NEUTRAL"
+    return "BEAR"
 
 
-def risk_icon(risk_level):
+def risk_label(risk_level):
     return {
-        "LOW": "🛡️",
-        "MEDIUM": "⚠️",
-        "HIGH": "🔥",
-    }.get(risk_level, "❔")
+        "LOW": "SAFE",
+        "MEDIUM": "WATCH",
+        "HIGH": "DANGER",
+    }.get(risk_level, "UNKNOWN")
 
 
 def format_opportunity_rows(items):
     rows = []
     for index, item in enumerate(items, start=1):
         rows.append(
-            f"`#{index:02}` {direction_icon(item['change_24h'])} **{item['symbol']}** "
-            f"| AI {ai_icon(item['ai_score'])} **{item['ai_score']:.1f}%** "
-            f"| Risk {risk_icon(item['risk_level'])} {item['risk_level']} "
-            f"| 4h `{item['change_24h']:+.2f}%`"
+            f"`#{index:02}` **{item['symbol']}** "
+            f"| {direction_label(item['change_24h'])} `{item['change_24h']:+.2f}%` "
+            f"| AI **{item['ai_score']:.1f}%** {ai_label(item['ai_score'])} "
+            f"| Risk **{item['risk_level']}** {risk_label(item['risk_level'])}"
         )
     return "\n".join(rows)
 
@@ -60,10 +61,57 @@ def format_scalper_rows(items):
         rows.append(
             f"`#{index:02}` **{item['symbol']}** "
             f"| Vol `{item['vol_pct']:.2f}%` "
-            f"| AI {ai_icon(item['ai_score'])} `{item['ai_score']:.1f}%` "
+            f"| AI `{item['ai_score']:.1f}%` {ai_label(item['ai_score'])} "
             f"| **{bias}**"
         )
     return "\n".join(rows)
+
+
+def payload_to_markdown(payload):
+    sections = [payload["content"]]
+    for embed in payload["embeds"]:
+        sections.append(f"## {embed['title']}\n{embed['description']}")
+    sections.append(payload["footer"]["text"])
+    return "\n\n".join(sections) + "\n"
+
+
+def save_local_report(payload):
+    os.makedirs(os.path.dirname(LOCAL_REPORT_PATH), exist_ok=True)
+    with open(LOCAL_REPORT_PATH, 'w', encoding='utf-8') as report_file:
+        report_file.write(payload_to_markdown(payload))
+    print(f"Report lokal disimpan ke {LOCAL_REPORT_PATH}")
+
+
+def should_fail_on_notification_error():
+    return os.getenv('GITHUB_ACTIONS') == 'true' or os.getenv('ATHENA_FAIL_ON_NOTIFY_ERROR') == '1'
+
+
+def send_discord_report(webhook_url, payload):
+    if not webhook_url:
+        save_local_report(payload)
+        message = "DISCORD_WEBHOOK_URL belum diset. Report hanya disimpan lokal."
+        if should_fail_on_notification_error():
+            raise RuntimeError(message)
+        print(message)
+        return
+
+    try:
+        response = requests.post(webhook_url, json=payload, timeout=30)
+        if response.status_code == 204:
+            print("Report sent to Discord.")
+            return
+
+        save_local_report(payload)
+        message = f"Discord webhook gagal dengan status {response.status_code}."
+        if should_fail_on_notification_error():
+            raise RuntimeError(message)
+        print(message)
+    except requests.RequestException as e:
+        save_local_report(payload)
+        message = f"Discord tidak bisa dijangkau dari environment ini: {type(e).__name__}"
+        if should_fail_on_notification_error():
+            raise RuntimeError(message) from e
+        print(message)
 
 
 def run_athena():
@@ -100,7 +148,7 @@ def run_athena():
     dom_path = os.path.join(DATA_FOLDER, 'BTCDOMUSDT.csv')
 
     if not os.path.exists(btc_path):
-        raise RuntimeError("BTC data tidak tersedia. Report Discord tidak bisa dibuat.")
+        raise RuntimeError("BTC data tidak tersedia. Report tidak bisa dibuat.")
 
     if not os.path.exists(dom_path):
         print("BTC dominance data tidak tersedia. ATHENA lanjut tanpa fitur dominance.")
@@ -144,19 +192,19 @@ def run_athena():
     payload = {
         "username": "ATHENA Intelligence",
         "content": (
-            f"🏛️ **ATHENA 4H REPORT** | Market: **{market_status}** | "
+            f"**ATHENA 4H REPORT** | Market: **{market_status}** | "
             f"Win Rate: **{win_rate}%**\n"
             f"Best setup: **{best_setup['symbol']}** "
             f"({best_setup['ai_score']:.1f}% AI, {best_setup['risk_level']} risk)"
         ),
         "embeds": [
             {
-                "title": "🎯 Top AI Opportunities",
+                "title": "Top AI Opportunities",
                 "description": format_opportunity_rows(top_opps),
                 "color": 0x00ff00,
             },
             {
-                "title": "⚡ Scalper Hotlist",
+                "title": "Scalper Hotlist",
                 "description": format_scalper_rows(scalp_list),
                 "color": 0xff0000,
             },
@@ -164,17 +212,7 @@ def run_athena():
         "footer": {"text": "ATHENA Engine v0.6 | 4H Data-Driven Intelligence"},
     }
 
-    if not hermes.webhook_url:
-        raise RuntimeError("DISCORD_WEBHOOK_URL belum diset. Report tidak dikirim.")
-
-    try:
-        response = requests.post(hermes.webhook_url, json=payload, timeout=30)
-        if response.status_code == 204:
-            print(f"Report sent. Market: {market_status} | Win rate: {win_rate}%")
-        else:
-            raise RuntimeError(f"Discord webhook gagal: {response.status_code} {response.text}")
-    except requests.RequestException as e:
-        raise RuntimeError(f"Discord webhook request gagal: {e}") from e
+    send_discord_report(hermes.webhook_url, payload)
 
 
 if __name__ == "__main__":
