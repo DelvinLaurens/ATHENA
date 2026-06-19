@@ -19,6 +19,53 @@ VALIDATION_HOURS = 4
 DATA_FOLDER = os.path.join('data', 'raw', SCAN_TIMEFRAME)
 
 
+def direction_icon(change_pct):
+    return "🟢" if change_pct >= 0 else "🔴"
+
+
+def ai_icon(ai_score):
+    if ai_score >= 70:
+        return "🚀"
+    if ai_score >= 55:
+        return "🟢"
+    if ai_score >= 45:
+        return "⚪"
+    return "🧊"
+
+
+def risk_icon(risk_level):
+    return {
+        "LOW": "🛡️",
+        "MEDIUM": "⚠️",
+        "HIGH": "🔥",
+    }.get(risk_level, "❔")
+
+
+def format_opportunity_rows(items):
+    rows = []
+    for index, item in enumerate(items, start=1):
+        rows.append(
+            f"`#{index:02}` {direction_icon(item['change_24h'])} **{item['symbol']}** "
+            f"| AI {ai_icon(item['ai_score'])} **{item['ai_score']:.1f}%** "
+            f"| Risk {risk_icon(item['risk_level'])} {item['risk_level']} "
+            f"| 4h `{item['change_24h']:+.2f}%`"
+        )
+    return "\n".join(rows)
+
+
+def format_scalper_rows(items):
+    rows = []
+    for index, item in enumerate(items, start=1):
+        bias = "LONG" if item['ai_score'] >= 55 else "AVOID/SHORT" if item['ai_score'] <= 45 else "NEUTRAL"
+        rows.append(
+            f"`#{index:02}` **{item['symbol']}** "
+            f"| Vol `{item['vol_pct']:.2f}%` "
+            f"| AI {ai_icon(item['ai_score'])} `{item['ai_score']:.1f}%` "
+            f"| **{bias}**"
+        )
+    return "\n".join(rows)
+
+
 def run_athena():
     print("ATHENA v0.6 - 4H Performance Tracking Engine starting...")
 
@@ -89,43 +136,28 @@ def run_athena():
 
     top_opps = sorted(results, key=lambda x: x['ai_score'], reverse=True)[:10]
     scalp_list = sorted(results, key=lambda x: x['vol_pct'], reverse=True)[:5]
-
-    opp_rows = ""
-    for item in top_opps:
-        price_emoji = "UP" if item['change_24h'] > 0 else "DOWN"
-        ai_emoji = "BULL" if item['ai_score'] > 50 else "BEAR"
-        risk_emoji = "SAFE" if item['risk_level'] == "LOW" else "WATCH" if item['risk_level'] == "MEDIUM" else "HIGH"
-        opp_rows += (
-            f"{price_emoji} **{item['symbol']}**\n"
-            f"- AI: {ai_emoji} {item['ai_score']:.1f}% | "
-            f"Risk: {risk_emoji} {item['risk_level']} | "
-            f"4h: {item['change_24h']:.2f}%\n\n"
-        )
-
-    scalp_rows = ""
-    for item in scalp_list:
-        ai_direction = "BULL" if item['ai_score'] > 50 else "BEAR"
-        scalp_rows += (
-            f"**{item['symbol']}** | Vol: **{item['vol_pct']}%** | "
-            f"AI: {ai_direction} {item['ai_score']:.1f}%\n"
-        )
+    best_setup = next(
+        (item for item in top_opps if item['ai_score'] >= 70 and item['risk_level'] != "HIGH"),
+        top_opps[0],
+    )
 
     payload = {
         "username": "ATHENA Intelligence",
         "content": (
-            f"**ATHENA 4H INTELLIGENCE REPORT**\n"
-            f"Market: **{market_status}**\n"
-            f"AI 7-Day Win Rate: **{win_rate}%**"
+            f"🏛️ **ATHENA 4H REPORT** | Market: **{market_status}** | "
+            f"Win Rate: **{win_rate}%**\n"
+            f"Best setup: **{best_setup['symbol']}** "
+            f"({best_setup['ai_score']:.1f}% AI, {best_setup['risk_level']} risk)"
         ),
         "embeds": [
             {
-                "title": "TOP 10 AI OPPORTUNITIES",
-                "description": opp_rows,
+                "title": "🎯 Top AI Opportunities",
+                "description": format_opportunity_rows(top_opps),
                 "color": 0x00ff00,
             },
             {
-                "title": "SCALPER'S HOTLIST (Highest Volatility)",
-                "description": scalp_rows,
+                "title": "⚡ Scalper Hotlist",
+                "description": format_scalper_rows(scalp_list),
                 "color": 0xff0000,
             },
         ],
