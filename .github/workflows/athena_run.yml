@@ -2,8 +2,8 @@ name: ATHENA 4H Scan
 
 on:
   schedule:
-    # 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
-    - cron: '0 */4 * * *' 
+    # 00:17, 04:17, 08:17, 12:17, 16:17, 20:17 UTC
+    - cron: '17 */4 * * *' 
   workflow_dispatch:      
 
 jobs:
