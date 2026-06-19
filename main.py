@@ -197,6 +197,7 @@ def run_athena():
 
     hits, total = validator.validate_yesterday(current_prices, min_age_hours=VALIDATION_HOURS)
     win_rate = validator.get_win_rate(days=7)
+    performance = validator.get_performance_summary(days=7)
     print(f"Validation: {hits}/{total} hits. 7-day win rate: {win_rate}%")
 
     btc_path = os.path.join(DATA_FOLDER, 'BTC_USDT.csv')
@@ -221,7 +222,6 @@ def run_athena():
             csv_path = os.path.join(DATA_FOLDER, f"{symbol.replace('/', '_')}.csv")
             score_data = artemis.calculate_score(symbol)
             ai_score = brain.train_and_predict(csv_path, dom_path)
-            validator.log_prediction(symbol, score_data['price'], ai_score)
             risk_level, vol_pct = aegis.assess_risk(csv_path)
 
             score_data.update({
@@ -238,6 +238,21 @@ def run_athena():
 
     top_opps = sorted(results, key=lambda x: x['ai_score'], reverse=True)[:10]
     scalp_list = sorted(results, key=lambda x: x['vol_pct'], reverse=True)[:5]
+    top_symbols = {item['symbol'] for item in top_opps}
+    scalp_symbols = {item['symbol'] for item in scalp_list}
+
+    for item in results:
+        validator.log_prediction(
+            item['symbol'],
+            item['price'],
+            item['ai_score'],
+            risk_level=item['risk_level'],
+            vol_pct=item['vol_pct'],
+            change_4h=item['change_24h'],
+            is_top_opportunity=item['symbol'] in top_symbols,
+            is_scalper_hotlist=item['symbol'] in scalp_symbols,
+        )
+
     best_setup = next(
         (item for item in top_opps if item['ai_score'] >= 70 and item['risk_level'] != "HIGH"),
         top_opps[0],
@@ -261,7 +276,21 @@ def run_athena():
                     },
                     {
                         "name": "7-Day Win Rate",
-                        "value": f"{win_rate}%",
+                        "value": (
+                            f"{win_rate}%\n"
+                            f"Avg return: {performance['avg_return_pct']:+.2f}%\n"
+                            f"Trades: {performance['trades']}"
+                        ),
+                        "inline": True,
+                    },
+                    {
+                        "name": "Signal Performance",
+                        "value": (
+                            f"LONG: {performance['long_win_rate']}%\n"
+                            f"SHORT: {performance['short_win_rate']}%\n"
+                            f"TOP: {performance['top_win_rate']}%\n"
+                            f"SCALPER: {performance['scalper_win_rate']}%"
+                        ),
                         "inline": True,
                     },
                     {
