@@ -9,10 +9,23 @@ load_dotenv()
 
 
 class BinanceProvider:
+    PUBLIC_BASE_URLS = [
+        'https://api.binance.com/api/v3',
+        'https://api1.binance.com/api/v3',
+        'https://api2.binance.com/api/v3',
+        'https://api3.binance.com/api/v3',
+        'https://api4.binance.com/api/v3',
+        'https://data-api.binance.vision/api/v3',
+    ]
+
     def __init__(self):
         # ATHENA hanya butuh market data public. Jangan pasang API key di sini,
         # karena ccxt bisa mencoba endpoint private Binance saat load market.
-        self.exchange = ccxt.binance({
+        self.endpoint_index = 0
+        self.exchange = self._create_exchange(self.PUBLIC_BASE_URLS[self.endpoint_index])
+
+    def _create_exchange(self, public_base_url):
+        exchange = ccxt.binance({
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'spot',
@@ -20,11 +33,28 @@ class BinanceProvider:
                 'adjustForTimeDifference': True,
             },
         })
+        exchange.urls['api']['public'] = public_base_url
+        exchange.urls['api']['v1'] = public_base_url.replace('/api/v3', '/api/v1')
+        return exchange
+
+    def _use_endpoint(self, index):
+        self.endpoint_index = index
+        self.exchange = self._create_exchange(self.PUBLIC_BASE_URLS[index])
+        print(f"Binance public endpoint: {self.PUBLIC_BASE_URLS[index]}")
 
     def get_top_volume_coins(self, limit=50):
         print(f"Mencari {limit} koin paling ramai di market...")
+        for index, _ in enumerate(self.PUBLIC_BASE_URLS):
+            self._use_endpoint(index)
+            try:
+                tickers = self.exchange.fetch_tickers()
+                break
+            except Exception as e:
+                print(f"Gagal mengambil tickers dari endpoint ini: {e}")
+        else:
+            return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
+
         try:
-            tickers = self.exchange.fetch_tickers()
             blacklist = {
                 'EUR/USDT',
                 'GBP/USDT',
@@ -54,21 +84,27 @@ class BinanceProvider:
             sorted_pairs = sorted(usdt_pairs, key=lambda x: x['quoteVolume'], reverse=True)
             return [pair['symbol'] for pair in sorted_pairs[:limit]]
         except Exception as e:
-            print(f"Gagal mengambil tickers: {e}")
+            print(f"Gagal memproses tickers: {e}")
             return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
 
     def fetch_ohlcv(self, symbol, timeframe='1d', limit=1000):
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-            if not ohlcv:
-                return None
+        endpoint_order = list(range(self.endpoint_index, len(self.PUBLIC_BASE_URLS)))
+        endpoint_order += list(range(0, self.endpoint_index))
 
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
-        except Exception as e:
-            print(f"Error saat mengambil data {symbol}: {e}")
-            return None
+        for index in endpoint_order:
+            self._use_endpoint(index)
+            try:
+                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+                if not ohlcv:
+                    return None
+
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                return df
+            except Exception as e:
+                print(f"Error saat mengambil data {symbol} dari endpoint ini: {e}")
+
+        return None
 
     def save_to_csv(self, df, symbol, data_folder='data/raw'):
         if df is None or df.empty:
