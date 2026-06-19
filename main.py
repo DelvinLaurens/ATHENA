@@ -101,9 +101,16 @@ def send_discord_report(webhook_url, payload):
         return
 
     try:
-        response = requests.post(webhook_url, json=payload, timeout=30)
-        if response.status_code == 204:
-            print("Report sent to Discord.")
+        response = requests.post(webhook_url, params={'wait': 'true'}, json=payload, timeout=30)
+        if response.status_code in (200, 204):
+            if response.status_code == 200:
+                message_data = response.json()
+                print(
+                    "Report accepted by Discord "
+                    f"(channel_id={message_data.get('channel_id')}, message_id={message_data.get('id')})."
+                )
+            else:
+                print("Report sent to Discord.")
             return
 
         save_local_report(payload)
