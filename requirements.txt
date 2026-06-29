@@ -1,4 +1,5 @@
 ccxt
+matplotlib
 pandas
 pandas-ta==0.4.71b0
 python-dotenv

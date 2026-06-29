@@ -5,8 +5,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Hermes:
+    LONG_CAUTION_THRESHOLD = 45.0
+
     def __init__(self):
         self.webhook_url = os.getenv('DISCORD_WEBHOOK_URL')
+
+    @classmethod
+    def title_with_signal_warning(cls, title, performance):
+        try:
+            long_win_rate = float(performance.get('long_win_rate', 0.0))
+        except (TypeError, ValueError):
+            long_win_rate = 0.0
+
+        if long_win_rate < cls.LONG_CAUTION_THRESHOLD:
+            return f"[⚠️ CAUTION ON LONGS] {title}"
+        return title
 
     def send_report(self, market_status, ranking_df):
         if not self.webhook_url:

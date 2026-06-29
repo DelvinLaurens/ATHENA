@@ -1,5 +1,6 @@
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pandas as pd
 import requests
@@ -20,6 +21,19 @@ SCAN_TIMEFRAME = '4h'
 VALIDATION_HOURS = 4
 DATA_FOLDER = os.path.join('data', 'raw', SCAN_TIMEFRAME)
 LOCAL_REPORT_PATH = os.path.join('data', 'latest_report.md')
+WATCH_LIST_LIMIT = 100
+DEFAULT_ANALYSIS_WORKERS = 6
+MAX_ANALYSIS_WORKERS = 8
+AI_SCORE_THRESHOLD = 68.0
+SIGNAL_RISK_LEVELS = {"LOW"}
+TOP_OPPORTUNITY_LIMIT = 10
+SCALPER_LIMIT = 5
+HIGH_PROBABILITY_MESSAGE = "No high-probability low-risk opportunities detected. Market is too uncertain."
+RISK_ORDER = {
+    "LOW": 0,
+    "MEDIUM": 1,
+    "HIGH": 2,
+}
 
 
 def direction_label(change_pct):
@@ -44,7 +58,47 @@ def risk_label(risk_level):
     }.get(risk_level, "UNKNOWN")
 
 
+def risk_rank(risk_level):
+    return RISK_ORDER.get(risk_level, 99)
+
+
+def is_signal_candidate(item):
+    return (
+        float(item['ai_score']) >= AI_SCORE_THRESHOLD
+        and item.get('risk_level') in SIGNAL_RISK_LEVELS
+    )
+
+
+def select_top_pick(items):
+    if not items:
+        return None
+
+    tradable_items = [item for item in items if item.get('risk_level') != "HIGH"]
+    candidates = tradable_items or items
+    return sorted(
+        candidates,
+        key=lambda item: (-float(item['ai_score']), risk_rank(item.get('risk_level'))),
+    )[0]
+
+
+def format_top_pick(item):
+    if item is None:
+        return HIGH_PROBABILITY_MESSAGE
+
+    return (
+        f"**{item['symbol']}**\n"
+        f"AI Score: {item['ai_score']:.1f}%\n"
+        f"Risk: {risk_label(item['risk_level'])}\n"
+        f"Price: {item['price']:.6g}\n"
+        f"4H Change: {item['change_24h']:+.2f}%\n"
+        f"Volatility: {item['vol_pct']:.2f}%"
+    )
+
+
 def format_opportunity_rows(items):
+    if not items:
+        return HIGH_PROBABILITY_MESSAGE
+
     lines = []
     for index, item in enumerate(items, start=1):
         pct_str = f"{item['change_24h']:+.2f}%"
@@ -58,6 +112,9 @@ def format_opportunity_rows(items):
 
 
 def format_scalper_rows(items):
+    if not items:
+        return HIGH_PROBABILITY_MESSAGE
+
     lines = []
     for index, item in enumerate(items, start=1):
         bias = "LONG" if item['ai_score'] >= 55 else "AVOID" if item['ai_score'] <= 45 else "NEUTRAL"
@@ -89,6 +146,39 @@ def save_local_report(payload):
 
 def should_fail_on_notification_error():
     return os.getenv('GITHUB_ACTIONS') == 'true' or os.getenv('ATHENA_FAIL_ON_NOTIFY_ERROR') == '1'
+
+
+def get_analysis_worker_count(symbol_count):
+    if symbol_count <= 0:
+        return 1
+
+    try:
+        configured_workers = int(os.getenv('ATHENA_ANALYSIS_WORKERS', DEFAULT_ANALYSIS_WORKERS))
+    except ValueError:
+        configured_workers = DEFAULT_ANALYSIS_WORKERS
+
+    return max(1, min(MAX_ANALYSIS_WORKERS, configured_workers, symbol_count))
+
+
+def analyze_symbol_worker(symbol, data_folder, dom_path, btc_path):
+    csv_path = os.path.join(data_folder, f"{symbol.replace('/', '_')}.csv")
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(csv_path)
+
+    artemis = Artemis(data_folder=data_folder)
+    brain = AthenaBrain()
+    aegis = Aegis()
+
+    score_data = artemis.calculate_score(symbol)
+    ai_score = brain.train_and_predict(csv_path, dom_path, btc_path)
+    risk_level, vol_pct = aegis.assess_risk(csv_path)
+
+    score_data.update({
+        'ai_score': ai_score,
+        'risk_level': risk_level,
+        'vol_pct': vol_pct,
+    })
+    return score_data
 
 
 def send_discord_report(webhook_url, payload):
@@ -170,16 +260,13 @@ def build_btc_dominance_proxy(data_folder, symbols):
 
 
 def run_athena():
-    print("ATHENA v0.6 - 4H Performance Tracking Engine starting...")
+    print("ATHENA v0.8.5 - The Sieve Engine starting...")
 
     provider = BinanceProvider()
-    brain = AthenaBrain()
-    artemis = Artemis(data_folder=DATA_FOLDER)
-    aegis = Aegis()
     hermes = Hermes()
     validator = AthenaValidator()
 
-    watch_list = provider.get_top_volume_coins(limit=50)
+    watch_list = provider.get_top_volume_coins(limit=WATCH_LIST_LIMIT)
     macro_symbols = [BTC_SYMBOL]
 
     for symbol in macro_symbols:
@@ -214,30 +301,44 @@ def run_athena():
 
     print("Analyzing market context and opportunities...")
     results = []
-    for symbol in watch_list:
-        if symbol in macro_symbols or symbol == DOMINANCE_SYMBOL:
-            continue
+    analysis_symbols = [
+        symbol for symbol in watch_list
+        if symbol not in macro_symbols and symbol != DOMINANCE_SYMBOL
+    ]
+    worker_count = get_analysis_worker_count(len(analysis_symbols))
+    print(f"Parallel analysis: {len(analysis_symbols)} symbols with {worker_count} workers.")
 
-        try:
-            csv_path = os.path.join(DATA_FOLDER, f"{symbol.replace('/', '_')}.csv")
-            score_data = artemis.calculate_score(symbol)
-            ai_score = brain.train_and_predict(csv_path, dom_path)
-            risk_level, vol_pct = aegis.assess_risk(csv_path)
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        future_to_symbol = {
+            executor.submit(analyze_symbol_worker, symbol, DATA_FOLDER, dom_path, btc_path): symbol
+            for symbol in analysis_symbols
+        }
 
-            score_data.update({
-                'ai_score': ai_score,
-                'risk_level': risk_level,
-                'vol_pct': vol_pct,
-            })
-            results.append(score_data)
-        except Exception as e:
-            print(f"Error processing {symbol}: {e}")
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                results.append(future.result())
+            except Exception as e:
+                print(f"Error processing {symbol}: {e}")
 
     if not results:
         raise RuntimeError("Tidak ada koin yang berhasil dianalisis. Report tidak dikirim.")
 
-    top_opps = sorted(results, key=lambda x: x['ai_score'], reverse=True)[:10]
-    scalp_list = sorted(results, key=lambda x: x['vol_pct'], reverse=True)[:5]
+    high_confidence_results = [
+        item for item in results
+        if is_signal_candidate(item)
+    ]
+    top_opps = sorted(
+        high_confidence_results,
+        key=lambda x: x['ai_score'],
+        reverse=True,
+    )[:TOP_OPPORTUNITY_LIMIT]
+    scalp_list = sorted(
+        high_confidence_results,
+        key=lambda x: x['vol_pct'],
+        reverse=True,
+    )[:SCALPER_LIMIT]
+    top_pick = select_top_pick(top_opps)
     top_symbols = {item['symbol'] for item in top_opps}
     scalp_symbols = {item['symbol'] for item in scalp_list}
 
@@ -253,20 +354,16 @@ def run_athena():
             is_scalper_hotlist=item['symbol'] in scalp_symbols,
         )
 
-    best_setup = next(
-        (item for item in top_opps if item['ai_score'] >= 70 and item['risk_level'] != "HIGH"),
-        top_opps[0],
-    )
-
     market_regime, _, dom_part = market_status.partition(" | ")
     btc_dom_status = dom_part.replace("BTC.D is ", "") if dom_part else "UNAVAILABLE"
+    report_title = hermes.title_with_signal_warning(f"Market Regime: {market_regime}", performance)
 
     payload = {
         "username": "ATHENA Intelligence",
         "content": "**ATHENA 4H Intelligence Report**",
         "embeds": [
             {
-                "title": f"Market Regime: {market_regime}",
+                "title": report_title,
                 "color": 0x2ecc71 if market_regime == "BULLISH" else 0xe74c3c,
                 "fields": [
                     {
@@ -294,11 +391,8 @@ def run_athena():
                         "inline": True,
                     },
                     {
-                        "name": "Best Setup",
-                        "value": (
-                            f"{best_setup['symbol']} - {best_setup['ai_score']:.1f}% AI, "
-                            f"{risk_label(best_setup['risk_level'])} risk"
-                        ),
+                        "name": "Top Pick",
+                        "value": format_top_pick(top_pick),
                         "inline": True,
                     },
                     {
@@ -312,7 +406,7 @@ def run_athena():
                         "inline": False,
                     },
                 ],
-                "footer": {"text": "ATHENA Engine v0.6 | 4H Data-Driven Intelligence"},
+                "footer": {"text": "ATHENA Engine v0.8.5 The Sieve | AI >= 68 + LOW Risk Filter"},
             },
         ],
     }

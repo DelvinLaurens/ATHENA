@@ -9,6 +9,7 @@ load_dotenv()
 
 
 class BinanceProvider:
+    MIN_QUOTE_VOLUME = 5_000_000
     PUBLIC_BASE_URLS = [
         'https://api.binance.com/api/v3',
         'https://api1.binance.com/api/v3',
@@ -17,6 +18,30 @@ class BinanceProvider:
         'https://api4.binance.com/api/v3',
         'https://data-api.binance.vision/api/v3',
     ]
+    BLACKLIST_PATTERNS = [
+        'USD',
+        'EUR',
+        'GBP',
+        'DAI',
+        'USDC',
+        'USDT',
+        'BUSD',
+        'FDUSD',
+        'TUSD',
+        'PAXG',
+        'AEUR',
+    ]
+    BLACKLIST_SYMBOLS = {
+        'EURUSDT',
+        'GBPUSDT',
+        'USDCUSDT',
+        'FDUSDUSDT',
+        'TUSDUSDT',
+        'PAXGUSDT',
+        'XAUTUSDT',
+        'AEURUSDT',
+    }
+    LEVERAGED_TOKENS = ['UPUSDT', 'DOWNUSDT', 'BEARUSDT', 'BULLUSDT']
 
     def __init__(self):
         self.endpoint_index = 0
@@ -51,34 +76,46 @@ class BinanceProvider:
             return f"{symbol[:-4]}/USDT"
         return symbol
 
+    @classmethod
+    def _base_asset(cls, symbol):
+        symbol = symbol.upper()
+        if symbol.endswith('USDT'):
+            return symbol[:-4]
+        return symbol.split('/')[0]
+
+    @classmethod
+    def _is_blacklisted_market(cls, symbol):
+        normalized_symbol = symbol.upper()
+        base_asset = cls._base_asset(normalized_symbol)
+        return (
+            normalized_symbol in cls.BLACKLIST_SYMBOLS
+            or any(pattern in base_asset for pattern in cls.BLACKLIST_PATTERNS)
+        )
+
     def get_top_volume_coins(self, limit=50):
-        print(f"Mencari {limit} koin paling ramai di market...")
+        print(
+            f"Mencari {limit} koin paling ramai di market "
+            f"dengan volume minimal ${self.MIN_QUOTE_VOLUME:,.0f}..."
+        )
         try:
             tickers = self._request('/ticker/24hr')
         except Exception as e:
             print(f"Gagal mengambil tickers: {e}")
             return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT']
 
-        blacklist = {
-            'EURUSDT',
-            'GBPUSDT',
-            'USDCUSDT',
-            'FDUSDUSDT',
-            'TUSDUSDT',
-            'PAXGUSDT',
-            'XAUTUSDT',
-            'AEURUSDT',
-        }
-
         usdt_pairs = []
         for item in tickers:
             symbol = item.get('symbol', '')
             quote_volume = float(item.get('quoteVolume') or 0)
-            is_leveraged = any(token in symbol for token in ['UPUSDT', 'DOWNUSDT', 'BEARUSDT', 'BULLUSDT'])
+            is_leveraged = any(token in symbol for token in self.LEVERAGED_TOKENS)
 
             if not symbol.endswith('USDT') or is_leveraged:
                 continue
-            if symbol in blacklist or not symbol.isascii() or quote_volume <= 0:
+            if (
+                self._is_blacklisted_market(symbol)
+                or not symbol.isascii()
+                or quote_volume < self.MIN_QUOTE_VOLUME
+            ):
                 continue
 
             usdt_pairs.append({
