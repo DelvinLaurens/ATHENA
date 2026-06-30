@@ -10,6 +10,7 @@ load_dotenv()
 
 class BinanceProvider:
     MIN_QUOTE_VOLUME = 5_000_000
+    MAX_KLINES_PER_REQUEST = 1000
     PUBLIC_BASE_URLS = [
         'https://api.binance.com/api/v3',
         'https://api1.binance.com/api/v3',
@@ -126,20 +127,8 @@ class BinanceProvider:
         sorted_pairs = sorted(usdt_pairs, key=lambda x: x['quoteVolume'], reverse=True)
         return [pair['symbol'] for pair in sorted_pairs[:limit]]
 
-    def fetch_ohlcv(self, symbol, timeframe='1d', limit=1000):
-        try:
-            klines = self._request('/klines', params={
-                'symbol': self._to_binance_symbol(symbol),
-                'interval': timeframe,
-                'limit': limit,
-            })
-        except Exception as e:
-            print(f"Error saat mengambil data {symbol}: {e}")
-            return None
-
-        if not klines:
-            return None
-
+    @staticmethod
+    def _klines_to_dataframe(klines):
         rows = []
         for candle in klines:
             rows.append({
@@ -152,6 +141,50 @@ class BinanceProvider:
             })
 
         return pd.DataFrame(rows)
+
+    def fetch_ohlcv(self, symbol, timeframe='1d', limit=1000):
+        requested_limit = max(1, int(limit))
+        remaining = requested_limit
+        end_time = None
+        all_klines = []
+
+        try:
+            while remaining > 0:
+                batch_limit = min(self.MAX_KLINES_PER_REQUEST, remaining)
+                params = {
+                    'symbol': self._to_binance_symbol(symbol),
+                    'interval': timeframe,
+                    'limit': batch_limit,
+                }
+                if end_time is not None:
+                    params['endTime'] = end_time
+
+                klines = self._request('/klines', params=params)
+                if not klines:
+                    break
+
+                all_klines = klines + all_klines
+                remaining -= len(klines)
+
+                oldest_open_time = int(klines[0][0])
+                next_end_time = oldest_open_time - 1
+                if end_time is not None and next_end_time >= end_time:
+                    break
+
+                end_time = next_end_time
+                if len(klines) < batch_limit:
+                    break
+        except Exception as e:
+            print(f"Error saat mengambil data {symbol}: {e}")
+            return None
+
+        if not all_klines:
+            return None
+
+        df = self._klines_to_dataframe(all_klines)
+        df = df.drop_duplicates(subset=['timestamp'], keep='last')
+        df = df.sort_values('timestamp')
+        return df.tail(requested_limit).reset_index(drop=True)
 
     def save_to_csv(self, df, symbol, data_folder='data/raw'):
         if df is None or df.empty:

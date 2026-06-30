@@ -21,6 +21,11 @@ class AthenaBrain:
         'ATR_Ratio',
         'BTC_Correlation_20h',
     ]
+    ALT_MARKET_FEATURES = [
+        'alt_market_change',
+        'alt_market_breadth',
+        'alt_volume_change',
+    ]
     TARGET_PROFIT_THRESHOLD = 0.005
     BTC_CORRELATION_PERIODS = 5
 
@@ -48,6 +53,12 @@ class AthenaBrain:
             'rf': 0.4,
         }
         self.model = self.xgb_model
+
+    def get_features(self, use_alt_market=False):
+        features = list(self.FEATURES)
+        if use_alt_market:
+            features += self.ALT_MARKET_FEATURES
+        return features
 
     @staticmethod
     def _first_indicator_column(indicator_df, prefix):
@@ -89,7 +100,35 @@ class AthenaBrain:
         )
         return df.drop(columns=['BTC_Close', 'coin_return', 'btc_return'])
 
-    def prepare_data(self, df, dom_df=None, btc_df=None):
+    def _add_alt_market_context(self, df, alt_df):
+        if alt_df is None or alt_df.empty:
+            df['alt_market_change'] = 0.0
+            df['alt_market_breadth'] = 0.5
+            df['alt_volume_change'] = 0.0
+            return df
+
+        alt_df = alt_df.copy()
+        alt_df['timestamp'] = pd.to_datetime(alt_df['timestamp'])
+        alt_df['close'] = pd.to_numeric(alt_df['close'], errors='coerce')
+
+        if 'alt_market_change' not in alt_df.columns:
+            alt_df['alt_market_change'] = alt_df['close'].pct_change()
+        if 'alt_market_breadth' not in alt_df.columns:
+            alt_df['alt_market_breadth'] = 0.5
+        if 'alt_volume_change' not in alt_df.columns:
+            alt_df['alt_volume_change'] = 0.0
+
+        alt_columns = [
+            'alt_market_change',
+            'alt_market_breadth',
+            'alt_volume_change',
+        ]
+        for column in alt_columns:
+            alt_df[column] = pd.to_numeric(alt_df[column], errors='coerce')
+
+        return pd.merge(df, alt_df[['timestamp'] + alt_columns], on='timestamp', how='left')
+
+    def prepare_data(self, df, dom_df=None, btc_df=None, alt_df=None):
         df = self._coerce_market_data(df)
 
         df['RSI'] = ta.rsi(df['close'], length=14)
@@ -125,8 +164,12 @@ class AthenaBrain:
             df['dom_change'] = 0.0
 
         df = self._add_btc_correlation(df, btc_df)
+        use_alt_market = alt_df is not None and not alt_df.empty
+        if use_alt_market:
+            df = self._add_alt_market_context(df, alt_df)
 
-        for column in self.FEATURES:
+        feature_columns = self.get_features(use_alt_market)
+        for column in feature_columns:
             df[column] = pd.to_numeric(df[column], errors='coerce')
 
         df['future_return_4h'] = (df['close'].shift(-1) - df['close']) / df['close']
@@ -134,8 +177,12 @@ class AthenaBrain:
         df = df.replace([np.inf, -np.inf], np.nan)
         df['dom_change'] = df['dom_change'].fillna(0.0)
         df['BTC_Correlation_20h'] = df['BTC_Correlation_20h'].fillna(0.0)
+        if use_alt_market:
+            df['alt_market_change'] = df['alt_market_change'].fillna(0.0)
+            df['alt_market_breadth'] = df['alt_market_breadth'].fillna(0.5)
+            df['alt_volume_change'] = df['alt_volume_change'].fillna(0.0)
 
-        return df.dropna(subset=self.FEATURES + ['Target'])
+        return df.dropna(subset=feature_columns + ['Target'])
 
     def _predict_positive_probability(self, model, X_train, y_train, X_latest):
         model.fit(X_train, y_train)
@@ -146,26 +193,31 @@ class AthenaBrain:
         class_index = classes.index(1)
         return float(model.predict_proba(X_latest)[0][class_index])
 
-    def train_and_predict(self, csv_path, dom_path=None, btc_path=None):
+    def train_and_predict(self, csv_path, dom_path=None, btc_path=None, alt_path=None, model_mode='ensemble'):
         try:
             df = pd.read_csv(csv_path)
             dom_df = pd.read_csv(dom_path) if dom_path and os.path.exists(dom_path) else None
             if btc_path is None:
                 btc_path = os.path.join(os.path.dirname(csv_path), 'BTC_USDT.csv')
             btc_df = pd.read_csv(btc_path) if btc_path and os.path.exists(btc_path) else None
+            alt_df = pd.read_csv(alt_path) if alt_path and os.path.exists(alt_path) else None
 
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             if dom_df is not None:
                 dom_df['timestamp'] = pd.to_datetime(dom_df['timestamp'])
             if btc_df is not None:
                 btc_df['timestamp'] = pd.to_datetime(btc_df['timestamp'])
+            if alt_df is not None:
+                alt_df['timestamp'] = pd.to_datetime(alt_df['timestamp'])
 
-            processed_df = self.prepare_data(df, dom_df, btc_df)
+            processed_df = self.prepare_data(df, dom_df, btc_df, alt_df)
 
             if len(processed_df) < 80:
                 return 50.0
 
-            X = processed_df[self.FEATURES]
+            use_alt_market = alt_df is not None and not alt_df.empty
+            feature_columns = self.get_features(use_alt_market)
+            X = processed_df[feature_columns]
             y = processed_df['Target']
 
             X_train = X.iloc[:-1]
@@ -175,22 +227,34 @@ class AthenaBrain:
             if y_train.nunique() < 2:
                 return round(float(y_train.mean()) * 100, 2)
 
-            xgb_probability = self._predict_positive_probability(
-                self.xgb_model,
-                X_train,
-                y_train,
-                X_latest,
-            )
-            rf_probability = self._predict_positive_probability(
-                self.rf_model,
-                X_train,
-                y_train,
-                X_latest,
-            )
-            probability = (
-                xgb_probability * self.model_weights['xgb']
-                + rf_probability * self.model_weights['rf']
-            )
+            xgb_probability = None
+            rf_probability = None
+
+            if model_mode in ['ensemble', 'xgb']:
+                xgb_probability = self._predict_positive_probability(
+                    self.xgb_model,
+                    X_train,
+                    y_train,
+                    X_latest,
+                )
+
+            if model_mode in ['ensemble', 'rf']:
+                rf_probability = self._predict_positive_probability(
+                    self.rf_model,
+                    X_train,
+                    y_train,
+                    X_latest,
+                )
+
+            if model_mode == 'xgb':
+                probability = xgb_probability
+            elif model_mode == 'rf':
+                probability = rf_probability
+            else:
+                probability = (
+                    xgb_probability * self.model_weights['xgb']
+                    + rf_probability * self.model_weights['rf']
+                )
 
             return round(probability * 100, 2)
         except Exception as e:

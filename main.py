@@ -9,6 +9,7 @@ from src.aegis.risk_manager import Aegis
 from src.apollo.regime_engine import Apollo
 from src.artemis.ranker import Artemis
 from src.brain.intelligence import AthenaBrain
+from src.brain.market_proxy import build_alt_market_proxy
 from src.brain.validator import AthenaValidator
 from src.hermes.notifier import Hermes
 from src.oracle.binance_provider import BinanceProvider
@@ -22,10 +23,26 @@ VALIDATION_HOURS = 4
 DATA_FOLDER = os.path.join('data', 'raw', SCAN_TIMEFRAME)
 LOCAL_REPORT_PATH = os.path.join('data', 'latest_report.md')
 WATCH_LIST_LIMIT = 100
+HISTORICAL_CANDLE_LIMIT = int(os.getenv('ATHENA_CANDLE_LIMIT', '2000'))
 DEFAULT_ANALYSIS_WORKERS = 6
 MAX_ANALYSIS_WORKERS = 8
-AI_SCORE_THRESHOLD = 68.0
+AI_SCORE_THRESHOLD = 72.0
+AI_MODEL_MODE = 'xgb'
+USE_ALT_MARKET_PROXY = os.getenv('ATHENA_USE_ALT_MARKET_PROXY') == '1'
 SIGNAL_RISK_LEVELS = {"LOW"}
+SIGNAL_SYMBOL_BLACKLIST = {
+    'AVAX/USDT',
+    'DOGE/USDT',
+    'ENA/USDT',
+    'FIL/USDT',
+    'HBAR/USDT',
+    'LINK/USDT',
+    'PEPE/USDT',
+    'SOL/USDT',
+    'TRUMP/USDT',
+    'UNI/USDT',
+    'WLD/USDT',
+}
 TOP_OPPORTUNITY_LIMIT = 10
 SCALPER_LIMIT = 5
 HIGH_PROBABILITY_MESSAGE = "No high-probability low-risk opportunities detected. Market is too uncertain."
@@ -66,6 +83,7 @@ def is_signal_candidate(item):
     return (
         float(item['ai_score']) >= AI_SCORE_THRESHOLD
         and item.get('risk_level') in SIGNAL_RISK_LEVELS
+        and item.get('symbol') not in SIGNAL_SYMBOL_BLACKLIST
     )
 
 
@@ -160,7 +178,7 @@ def get_analysis_worker_count(symbol_count):
     return max(1, min(MAX_ANALYSIS_WORKERS, configured_workers, symbol_count))
 
 
-def analyze_symbol_worker(symbol, data_folder, dom_path, btc_path):
+def analyze_symbol_worker(symbol, data_folder, dom_path, btc_path, alt_path):
     csv_path = os.path.join(data_folder, f"{symbol.replace('/', '_')}.csv")
     if not os.path.exists(csv_path):
         raise FileNotFoundError(csv_path)
@@ -170,7 +188,7 @@ def analyze_symbol_worker(symbol, data_folder, dom_path, btc_path):
     aegis = Aegis()
 
     score_data = artemis.calculate_score(symbol)
-    ai_score = brain.train_and_predict(csv_path, dom_path, btc_path)
+    ai_score = brain.train_and_predict(csv_path, dom_path, btc_path, alt_path=alt_path, model_mode=AI_MODEL_MODE)
     risk_level, vol_pct = aegis.assess_risk(csv_path)
 
     score_data.update({
@@ -276,7 +294,7 @@ def run_athena():
     print(f"Syncing historical data ({SCAN_TIMEFRAME} timeframe)...")
     current_prices = {}
     for symbol in watch_list:
-        data = provider.fetch_ohlcv(symbol, timeframe=SCAN_TIMEFRAME, limit=1000)
+        data = provider.fetch_ohlcv(symbol, timeframe=SCAN_TIMEFRAME, limit=HISTORICAL_CANDLE_LIMIT)
         provider.save_to_csv(data, symbol, data_folder=DATA_FOLDER)
         if data is not None and not data.empty:
             current_prices[symbol] = data['close'].iloc[-1]
@@ -289,12 +307,15 @@ def run_athena():
 
     btc_path = os.path.join(DATA_FOLDER, 'BTC_USDT.csv')
     dom_path = build_btc_dominance_proxy(DATA_FOLDER, watch_list)
+    alt_path = build_alt_market_proxy(DATA_FOLDER, watch_list) if USE_ALT_MARKET_PROXY else None
 
     if not os.path.exists(btc_path):
         raise RuntimeError("BTC data tidak tersedia. Report tidak bisa dibuat.")
 
     if dom_path is None:
         print("BTC dominance proxy tidak tersedia. ATHENA lanjut tanpa fitur dominance.")
+    if USE_ALT_MARKET_PROXY and alt_path is None:
+        print("Alt market proxy tidak tersedia. ATHENA lanjut tanpa fitur altmarket.")
 
     apollo = Apollo(btc_path, dom_path)
     market_status = apollo.analyze_trend()
@@ -310,7 +331,7 @@ def run_athena():
 
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
         future_to_symbol = {
-            executor.submit(analyze_symbol_worker, symbol, DATA_FOLDER, dom_path, btc_path): symbol
+            executor.submit(analyze_symbol_worker, symbol, DATA_FOLDER, dom_path, btc_path, alt_path): symbol
             for symbol in analysis_symbols
         }
 
@@ -406,7 +427,7 @@ def run_athena():
                         "inline": False,
                     },
                 ],
-                "footer": {"text": "ATHENA Engine v0.8.5 The Sieve | AI >= 68 + LOW Risk Filter"},
+                "footer": {"text": "ATHENA Engine v0.8.5 The Sieve | AI >= 72 + LOW Risk + XGB Filter"},
             },
         ],
     }

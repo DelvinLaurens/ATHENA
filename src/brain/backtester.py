@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import pandas as pd
 
 from src.brain.intelligence import AthenaBrain
+from src.brain.market_proxy import ALT_MARKET_PROXY_FILE, build_alt_market_proxy
+from src.oracle.binance_provider import BinanceProvider
 
 
 @dataclass
@@ -19,6 +21,11 @@ class BacktestConfig:
     train_size: int = 700
     max_steps: int | None = None
     risk_filter: str | None = None
+    model_mode: str = 'ensemble'
+    confirmation_threshold: float = 50.0
+    use_alt_market_proxy: bool = False
+    include_symbols: set[str] | None = None
+    exclude_symbols: set[str] | None = None
 
 
 class AthenaBacktester:
@@ -26,7 +33,10 @@ class AthenaBacktester:
         'BTC_USDT.csv',
         'BTC_DOM_PROXY.csv',
         'BTCDOMUSDT.csv',
+        ALT_MARKET_PROXY_FILE,
     }
+    BLACKLIST_PATTERNS = BinanceProvider.BLACKLIST_PATTERNS
+    BLACKLIST_SYMBOLS = BinanceProvider.BLACKLIST_SYMBOLS
 
     def __init__(self, config=None):
         self.config = config or BacktestConfig()
@@ -40,6 +50,15 @@ class AthenaBacktester:
     def filename_to_symbol(filename):
         return filename.replace('.csv', '').replace('_', '/')
 
+    @classmethod
+    def is_blacklisted_symbol(cls, symbol):
+        normalized_symbol = symbol.replace('/', '').replace('_', '').upper()
+        base_asset = symbol.replace('_', '/').split('/')[0].upper()
+        return (
+            normalized_symbol in cls.BLACKLIST_SYMBOLS
+            or any(pattern in base_asset for pattern in cls.BLACKLIST_PATTERNS)
+        )
+
     def _csv_path(self, symbol):
         return os.path.join(self.config.data_folder, self.symbol_to_filename(symbol))
 
@@ -50,6 +69,14 @@ class AthenaBacktester:
 
         return pd.read_csv(path)
 
+    def _ensure_alt_market_proxy(self):
+        path = os.path.join(self.config.data_folder, ALT_MARKET_PROXY_FILE)
+        if os.path.exists(path):
+            return path
+
+        symbols = self.discover_symbols()
+        return build_alt_market_proxy(self.config.data_folder, symbols)
+
     def _prepare_symbol_data(self, symbol):
         csv_path = self._csv_path(symbol)
         if not os.path.exists(csv_path):
@@ -58,7 +85,11 @@ class AthenaBacktester:
         df = pd.read_csv(csv_path)
         dom_df = self._load_optional_csv('BTC_DOM_PROXY.csv')
         btc_df = self._load_optional_csv('BTC_USDT.csv')
-        processed_df = self.brain.prepare_data(df, dom_df, btc_df)
+        alt_df = None
+        if self.config.use_alt_market_proxy:
+            alt_path = self._ensure_alt_market_proxy()
+            alt_df = pd.read_csv(alt_path) if alt_path and os.path.exists(alt_path) else None
+        processed_df = self.brain.prepare_data(df, dom_df, btc_df, alt_df)
         processed_df = processed_df.dropna(subset=['future_return_4h'])
         return processed_df.reset_index(drop=True)
 
@@ -67,24 +98,46 @@ class AthenaBacktester:
         if y_train.nunique() < 2:
             return round(float(y_train.mean()) * 100, 2)
 
-        x_train = train_df[self.brain.FEATURES]
-        x_latest = latest_df[self.brain.FEATURES]
-        xgb_probability = self.brain._predict_positive_probability(
-            self.brain.xgb_model,
-            x_train,
-            y_train,
-            x_latest,
+        use_alt_market = (
+            self.config.use_alt_market_proxy
+            and all(column in train_df.columns for column in self.brain.ALT_MARKET_FEATURES)
         )
-        rf_probability = self.brain._predict_positive_probability(
-            self.brain.rf_model,
-            x_train,
-            y_train,
-            x_latest,
-        )
-        probability = (
-            xgb_probability * self.brain.model_weights['xgb']
-            + rf_probability * self.brain.model_weights['rf']
-        )
+        feature_columns = self.brain.get_features(use_alt_market)
+        x_train = train_df[feature_columns]
+        x_latest = latest_df[feature_columns]
+        xgb_probability = None
+        rf_probability = None
+
+        if self.config.model_mode in ['ensemble', 'xgb', 'xgb_rf_confirm']:
+            xgb_probability = self.brain._predict_positive_probability(
+                self.brain.xgb_model,
+                x_train,
+                y_train,
+                x_latest,
+            )
+
+        if self.config.model_mode in ['ensemble', 'rf', 'xgb_rf_confirm']:
+            rf_probability = self.brain._predict_positive_probability(
+                self.brain.rf_model,
+                x_train,
+                y_train,
+                x_latest,
+            )
+
+        if self.config.model_mode == 'xgb':
+            probability = xgb_probability
+        elif self.config.model_mode == 'rf':
+            probability = rf_probability
+        elif self.config.model_mode == 'xgb_rf_confirm':
+            rf_score = rf_probability * 100
+            if rf_score < self.config.confirmation_threshold:
+                return 0.0
+            probability = xgb_probability
+        else:
+            probability = (
+                xgb_probability * self.brain.model_weights['xgb']
+                + rf_probability * self.brain.model_weights['rf']
+            )
         return round(probability * 100, 2)
 
     @staticmethod
@@ -108,6 +161,13 @@ class AthenaBacktester:
         return (self.config.fee_pct + self.config.slippage_pct) * 2
 
     def backtest_symbol(self, symbol):
+        if self.config.exclude_symbols and symbol in self.config.exclude_symbols:
+            return {
+                'symbol': symbol,
+                'trades': pd.DataFrame(),
+                'metrics': self._empty_metrics(symbol),
+            }
+
         processed_df = self._prepare_symbol_data(symbol)
         if len(processed_df) <= self.config.train_size:
             return {
@@ -123,15 +183,17 @@ class AthenaBacktester:
             test_stop = min(test_stop, self.config.train_size + self.config.max_steps)
 
         for row_index in range(self.config.train_size, test_stop):
-            train_df = processed_df.iloc[:row_index]
             latest_df = processed_df.iloc[[row_index]]
             latest_row = latest_df.iloc[0]
-            ai_score = self._score_row(train_df, latest_df)
             risk_level, vol_pct = self._assess_row_risk(latest_row)
 
-            if ai_score < self.config.ai_score_threshold:
-                continue
             if self.config.risk_filter and risk_level != self.config.risk_filter:
+                continue
+
+            train_df = processed_df.iloc[:row_index]
+            ai_score = self._score_row(train_df, latest_df)
+
+            if ai_score < self.config.ai_score_threshold:
                 continue
 
             future_return = float(latest_row['future_return_4h'])
@@ -166,6 +228,16 @@ class AthenaBacktester:
 
     def backtest_folder(self, symbols=None, max_symbols=None):
         selected_symbols = symbols or self.discover_symbols()
+        if self.config.include_symbols:
+            selected_symbols = [
+                symbol for symbol in selected_symbols
+                if symbol in self.config.include_symbols
+            ]
+        if self.config.exclude_symbols:
+            selected_symbols = [
+                symbol for symbol in selected_symbols
+                if symbol not in self.config.exclude_symbols
+            ]
         if max_symbols is not None:
             selected_symbols = selected_symbols[:max_symbols]
 
@@ -195,7 +267,10 @@ class AthenaBacktester:
         for filename in sorted(os.listdir(self.config.data_folder)):
             if not filename.endswith('.csv') or filename in self.EXCLUDED_FILES:
                 continue
-            symbols.append(self.filename_to_symbol(filename))
+            symbol = self.filename_to_symbol(filename)
+            if self.is_blacklisted_symbol(symbol):
+                continue
+            symbols.append(symbol)
         return symbols
 
     def recalculate_equity(self, trades_df):
@@ -327,7 +402,7 @@ class AthenaBacktester:
         }
 
 
-def print_report(result):
+def print_report(result, show_empty_symbols=False):
     metrics = result['metrics']
     print("ATHENA v0.9 Backtest Report")
     print("===========================")
@@ -336,9 +411,18 @@ def print_report(result):
 
     per_symbol = result.get('per_symbol')
     if per_symbol is not None and not per_symbol.empty:
+        display_df = per_symbol
+        if not show_empty_symbols:
+            display_df = display_df[display_df['trades'] > 0]
+
+        if display_df.empty:
+            print("\nWin Rate per Coin")
+            print("No symbols generated trades.")
+            return
+
         print("\nWin Rate per Coin")
         print(
-            per_symbol
+            display_df
             .sort_values(['win_rate_pct', 'trades'], ascending=[False, False])
             .to_string(index=False)
         )
@@ -358,6 +442,13 @@ def parse_thresholds(value):
     return [float(item.strip()) for item in value.split(',') if item.strip()]
 
 
+def parse_symbols(value):
+    if not value:
+        return None
+
+    return {item.strip().upper() for item in value.split(',') if item.strip()}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='ATHENA v0.9 walk-forward backtester')
     parser.add_argument('--symbol', help='Run one symbol, e.g. SOL/USDT')
@@ -370,8 +461,14 @@ def parse_args():
     parser.add_argument('--position-size', type=float, default=100.0)
     parser.add_argument('--max-steps', type=int)
     parser.add_argument('--max-symbols', type=int)
+    parser.add_argument('--include-symbols', help='Comma-separated symbols to include, e.g. ETH/USDT,BCH/USDT')
+    parser.add_argument('--exclude-symbols', help='Comma-separated symbols to exclude, e.g. PEPE/USDT,FIL/USDT')
     parser.add_argument('--risk-level', choices=['LOW', 'MEDIUM', 'HIGH'])
+    parser.add_argument('--model', choices=['ensemble', 'xgb', 'rf', 'xgb_rf_confirm'], default='ensemble')
+    parser.add_argument('--confirm-threshold', type=float, default=50.0)
+    parser.add_argument('--use-alt-market-proxy', action='store_true')
     parser.add_argument('--optimize-thresholds', help='Comma-separated thresholds, e.g. 70,75,80,85,90')
+    parser.add_argument('--show-empty-symbols', action='store_true')
     parser.add_argument('--plot-equity', action='store_true')
     parser.add_argument('--output-dir')
     return parser.parse_args()
@@ -389,6 +486,11 @@ def main():
         train_size=args.train_size,
         max_steps=args.max_steps,
         risk_filter=args.risk_level,
+        model_mode=args.model,
+        confirmation_threshold=args.confirm_threshold,
+        use_alt_market_proxy=args.use_alt_market_proxy,
+        include_symbols=parse_symbols(args.include_symbols),
+        exclude_symbols=parse_symbols(args.exclude_symbols),
     )
     backtester = AthenaBacktester(config)
 
@@ -409,7 +511,7 @@ def main():
     else:
         result = backtester.backtest_folder(max_symbols=args.max_symbols)
 
-    print_report(result)
+    print_report(result, show_empty_symbols=args.show_empty_symbols)
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
