@@ -143,9 +143,13 @@ class AthenaValidator:
             return {
                 'trades': 0,
                 'avg_return_pct': 0.0,
+                'long_trades': 0,
                 'long_win_rate': 0.0,
+                'short_trades': 0,
                 'short_win_rate': 0.0,
+                'top_trades': 0,
                 'top_win_rate': 0.0,
+                'scalper_trades': 0,
                 'scalper_win_rate': 0.0,
             }
 
@@ -154,9 +158,13 @@ class AthenaValidator:
             return {
                 'trades': 0,
                 'avg_return_pct': 0.0,
+                'long_trades': 0,
                 'long_win_rate': 0.0,
+                'short_trades': 0,
                 'short_win_rate': 0.0,
+                'top_trades': 0,
                 'top_win_rate': 0.0,
+                'scalper_trades': 0,
                 'scalper_win_rate': 0.0,
             }
 
@@ -168,11 +176,20 @@ class AthenaValidator:
                 return 0.0
             return round((group['result'].sum() / len(group)) * 100, 2)
 
+        long_df = recent_df[recent_df['signal'] == 'LONG']
+        short_df = recent_df[recent_df['signal'] == 'SHORT']
+        top_df = recent_df[recent_df['is_top_opportunity'].astype(str).str.lower().isin(['true', '1'])]
+        scalper_df = recent_df[recent_df['is_scalper_hotlist'].astype(str).str.lower().isin(['true', '1'])]
+
         return {
             'trades': len(recent_df),
             'avg_return_pct': round(recent_df['return_pct'].mean(), 4),
-            'long_win_rate': group_win_rate(recent_df[recent_df['signal'] == 'LONG']),
-            'short_win_rate': group_win_rate(recent_df[recent_df['signal'] == 'SHORT']),
-            'top_win_rate': group_win_rate(recent_df[recent_df['is_top_opportunity'].astype(str).str.lower().isin(['true', '1'])]),
-            'scalper_win_rate': group_win_rate(recent_df[recent_df['is_scalper_hotlist'].astype(str).str.lower().isin(['true', '1'])]),
+            'long_trades': len(long_df),
+            'long_win_rate': group_win_rate(long_df),
+            'short_trades': len(short_df),
+            'short_win_rate': group_win_rate(short_df),
+            'top_trades': len(top_df),
+            'top_win_rate': group_win_rate(top_df),
+            'scalper_trades': len(scalper_df),
+            'scalper_win_rate': group_win_rate(scalper_df),
         }

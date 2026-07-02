@@ -26,7 +26,10 @@ WATCH_LIST_LIMIT = 100
 HISTORICAL_CANDLE_LIMIT = int(os.getenv('ATHENA_CANDLE_LIMIT', '2000'))
 DEFAULT_ANALYSIS_WORKERS = 6
 MAX_ANALYSIS_WORKERS = 8
-AI_SCORE_THRESHOLD = 72.0
+AI_SCORE_THRESHOLD = 68.0
+PRIME_ALERT_THRESHOLD = 70.0
+GRAY_ZONE_START = 75.0
+ULTRA_ALERT_THRESHOLD = 80.0
 AI_MODEL_MODE = 'xgb'
 USE_ALT_MARKET_PROXY = os.getenv('ATHENA_USE_ALT_MARKET_PROXY') == '1'
 SIGNAL_RISK_LEVELS = {"LOW"}
@@ -58,8 +61,14 @@ def direction_label(change_pct):
 
 
 def ai_label(ai_score):
-    if ai_score >= 70:
-        return "STRONG"
+    if ai_score >= ULTRA_ALERT_THRESHOLD:
+        return "ULTRA"
+    if ai_score >= GRAY_ZONE_START:
+        return "GRAY"
+    if ai_score >= PRIME_ALERT_THRESHOLD:
+        return "PRIME"
+    if ai_score >= AI_SCORE_THRESHOLD:
+        return "WATCH"
     if ai_score >= 55:
         return "BULL"
     if ai_score >= 45:
@@ -79,11 +88,29 @@ def risk_rank(risk_level):
     return RISK_ORDER.get(risk_level, 99)
 
 
+def format_performance_line(label, win_rate, trades):
+    if trades == 0:
+        return f"{label}: N/A (0)"
+    return f"{label}: {win_rate}% ({trades})"
+
+
 def is_signal_candidate(item):
+    ai_score = float(item['ai_score'])
     return (
-        float(item['ai_score']) >= AI_SCORE_THRESHOLD
+        (
+            AI_SCORE_THRESHOLD <= ai_score < GRAY_ZONE_START
+            or ai_score >= ULTRA_ALERT_THRESHOLD
+        )
         and item.get('risk_level') in SIGNAL_RISK_LEVELS
         and item.get('symbol') not in SIGNAL_SYMBOL_BLACKLIST
+    )
+
+
+def is_discord_alert(item):
+    ai_score = float(item['ai_score'])
+    return is_signal_candidate(item) and (
+        PRIME_ALERT_THRESHOLD <= ai_score < GRAY_ZONE_START
+        or ai_score >= ULTRA_ALERT_THRESHOLD
     )
 
 
@@ -124,6 +151,7 @@ def format_opportunity_rows(items):
             f"{index:>2}. {item['symbol']:<12}"
             f"{pct_str:>8}   "
             f"AI {item['ai_score']:>4.1f}%   "
+            f"{ai_label(item['ai_score'])}   "
             f"{risk_label(item['risk_level'])}"
         )
     return "```\n" + "\n".join(lines) + "\n```"
@@ -135,7 +163,7 @@ def format_scalper_rows(items):
 
     lines = []
     for index, item in enumerate(items, start=1):
-        bias = "LONG" if item['ai_score'] >= 55 else "AVOID" if item['ai_score'] <= 45 else "NEUTRAL"
+        bias = ai_label(item['ai_score'])
         lines.append(
             f"{index:>2}. {item['symbol']:<12}"
             f"Vol {item['vol_pct']:>5.2f}%   "
@@ -349,13 +377,17 @@ def run_athena():
         item for item in results
         if is_signal_candidate(item)
     ]
+    discord_alert_results = [
+        item for item in high_confidence_results
+        if is_discord_alert(item)
+    ]
     top_opps = sorted(
-        high_confidence_results,
+        discord_alert_results,
         key=lambda x: x['ai_score'],
         reverse=True,
     )[:TOP_OPPORTUNITY_LIMIT]
     scalp_list = sorted(
-        high_confidence_results,
+        discord_alert_results,
         key=lambda x: x['vol_pct'],
         reverse=True,
     )[:SCALPER_LIMIT]
@@ -404,10 +436,10 @@ def run_athena():
                     {
                         "name": "Signal Performance",
                         "value": (
-                            f"LONG: {performance['long_win_rate']}%\n"
-                            f"SHORT: {performance['short_win_rate']}%\n"
-                            f"TOP: {performance['top_win_rate']}%\n"
-                            f"SCALPER: {performance['scalper_win_rate']}%"
+                            f"{format_performance_line('LONG', performance['long_win_rate'], performance['long_trades'])}\n"
+                            f"{format_performance_line('SHORT', performance['short_win_rate'], performance['short_trades'])}\n"
+                            f"{format_performance_line('TOP', performance['top_win_rate'], performance['top_trades'])}\n"
+                            f"{format_performance_line('SCALPER', performance['scalper_win_rate'], performance['scalper_trades'])}"
                         ),
                         "inline": True,
                     },
@@ -427,7 +459,7 @@ def run_athena():
                         "inline": False,
                     },
                 ],
-                "footer": {"text": "ATHENA Engine v0.8.5 The Sieve | AI >= 72 + LOW Risk + XGB Filter"},
+                "footer": {"text": "ATHENA Engine v1.0 RC | Bands 68-75 or 80+ | Discord 70-75 or 80+ | LOW Risk + XGB"},
             },
         ],
     }

@@ -24,6 +24,7 @@ class BacktestConfig:
     model_mode: str = 'ensemble'
     confirmation_threshold: float = 50.0
     use_alt_market_proxy: bool = False
+    score_bands: list[tuple[float, float]] | None = None
     include_symbols: set[str] | None = None
     exclude_symbols: set[str] | None = None
 
@@ -160,6 +161,13 @@ class AthenaBacktester:
     def _round_trip_cost_pct(self):
         return (self.config.fee_pct + self.config.slippage_pct) * 2
 
+    @staticmethod
+    def _score_in_bands(ai_score, score_bands):
+        if not score_bands:
+            return True
+
+        return any(lower <= ai_score < upper for lower, upper in score_bands)
+
     def backtest_symbol(self, symbol):
         if self.config.exclude_symbols and symbol in self.config.exclude_symbols:
             return {
@@ -194,6 +202,8 @@ class AthenaBacktester:
             ai_score = self._score_row(train_df, latest_df)
 
             if ai_score < self.config.ai_score_threshold:
+                continue
+            if not self._score_in_bands(ai_score, self.config.score_bands):
                 continue
 
             future_return = float(latest_row['future_return_4h'])
@@ -449,6 +459,20 @@ def parse_symbols(value):
     return {item.strip().upper() for item in value.split(',') if item.strip()}
 
 
+def parse_score_bands(value):
+    if not value:
+        return None
+
+    bands = []
+    for item in value.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        lower, upper = item.split(':', maxsplit=1)
+        bands.append((float(lower), float(upper)))
+    return bands
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='ATHENA v0.9 walk-forward backtester')
     parser.add_argument('--symbol', help='Run one symbol, e.g. SOL/USDT')
@@ -467,6 +491,7 @@ def parse_args():
     parser.add_argument('--model', choices=['ensemble', 'xgb', 'rf', 'xgb_rf_confirm'], default='ensemble')
     parser.add_argument('--confirm-threshold', type=float, default=50.0)
     parser.add_argument('--use-alt-market-proxy', action='store_true')
+    parser.add_argument('--score-bands', help='Comma-separated score ranges, e.g. 68:75,80:100')
     parser.add_argument('--optimize-thresholds', help='Comma-separated thresholds, e.g. 70,75,80,85,90')
     parser.add_argument('--show-empty-symbols', action='store_true')
     parser.add_argument('--plot-equity', action='store_true')
@@ -489,6 +514,7 @@ def main():
         model_mode=args.model,
         confirmation_threshold=args.confirm_threshold,
         use_alt_market_proxy=args.use_alt_market_proxy,
+        score_bands=parse_score_bands(args.score_bands),
         include_symbols=parse_symbols(args.include_symbols),
         exclude_symbols=parse_symbols(args.exclude_symbols),
     )
