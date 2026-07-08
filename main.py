@@ -10,6 +10,7 @@ from src.apollo.regime_engine import Apollo
 from src.artemis.ranker import Artemis
 from src.brain.intelligence import AthenaBrain
 from src.brain.market_proxy import build_alt_market_proxy
+from src.brain.meta_filter import AthenaMetaFilter, MetaFilterConfig
 from src.brain.validator import AthenaValidator
 from src.hermes.notifier import Hermes
 from src.oracle.binance_provider import BinanceProvider
@@ -32,7 +33,14 @@ GRAY_ZONE_START = 75.0
 ULTRA_ALERT_THRESHOLD = 80.0
 AI_MODEL_MODE = 'xgb'
 USE_ALT_MARKET_PROXY = os.getenv('ATHENA_USE_ALT_MARKET_PROXY') == '1'
-SIGNAL_RISK_LEVELS = {"LOW"}
+META_FILTER_ENABLED = os.getenv('ATHENA_META_FILTER_ENABLED', '1') != '0'
+META_SCORE_THRESHOLD = float(os.getenv('ATHENA_META_SCORE_THRESHOLD', '52.0'))
+META_MODEL_PATH = os.path.join('models', 'meta_filter.pkl')
+SIGNAL_SCORE_BANDS = (
+    (68.0, 70.0),
+    (72.0, 75.0),
+)
+SIGNAL_RISK_LEVELS = {"LOW", "MEDIUM", "HIGH"}
 SIGNAL_SYMBOL_BLACKLIST = {
     'AVAX/USDT',
     'DOGE/USDT',
@@ -48,7 +56,7 @@ SIGNAL_SYMBOL_BLACKLIST = {
 }
 TOP_OPPORTUNITY_LIMIT = 10
 SCALPER_LIMIT = 5
-HIGH_PROBABILITY_MESSAGE = "No high-probability low-risk opportunities detected. Market is too uncertain."
+HIGH_PROBABILITY_MESSAGE = "No policy-qualified opportunities detected. Market is too uncertain."
 RISK_ORDER = {
     "LOW": 0,
     "MEDIUM": 1,
@@ -94,24 +102,51 @@ def format_performance_line(label, win_rate, trades):
     return f"{label}: {win_rate}% ({trades})"
 
 
+def format_meta_score(item):
+    meta_score = item.get('meta_score')
+    if meta_score is None:
+        return "N/A"
+    return f"{float(meta_score):.1f}%"
+
+
+def format_meta_filter_summary(summary):
+    if not summary.get('enabled', True):
+        return "Disabled"
+
+    if not summary.get('ready'):
+        return (
+            f"Learning mode\n"
+            f"Source: {summary.get('source', 'unknown')}\n"
+            f"Rows: {summary.get('training_rows', 0)}"
+        )
+
+    return (
+        f"Threshold: {summary.get('threshold', META_SCORE_THRESHOLD):.1f}%\n"
+        f"Rows: {summary.get('training_rows', 0)}\n"
+        f"Positive after fees: {summary.get('positive_rate', 0.0):.2f}%\n"
+        f"Auto blacklist: {summary.get('auto_blacklist_count', 0)}"
+    )
+
+
+def is_score_in_signal_band(ai_score):
+    return any(lower <= ai_score < upper for lower, upper in SIGNAL_SCORE_BANDS)
+
+
 def is_signal_candidate(item):
     ai_score = float(item['ai_score'])
+    meta_ready = bool(item.get('meta_filter_ready'))
+    meta_score = float(item.get('meta_score', 50.0))
     return (
-        (
-            AI_SCORE_THRESHOLD <= ai_score < GRAY_ZONE_START
-            or ai_score >= ULTRA_ALERT_THRESHOLD
-        )
+        is_score_in_signal_band(ai_score)
         and item.get('risk_level') in SIGNAL_RISK_LEVELS
         and item.get('symbol') not in SIGNAL_SYMBOL_BLACKLIST
+        and not item.get('is_auto_blacklisted', False)
+        and (not meta_ready or meta_score >= META_SCORE_THRESHOLD)
     )
 
 
 def is_discord_alert(item):
-    ai_score = float(item['ai_score'])
-    return is_signal_candidate(item) and (
-        PRIME_ALERT_THRESHOLD <= ai_score < GRAY_ZONE_START
-        or ai_score >= ULTRA_ALERT_THRESHOLD
-    )
+    return is_signal_candidate(item)
 
 
 def select_top_pick(items):
@@ -133,6 +168,7 @@ def format_top_pick(item):
     return (
         f"**{item['symbol']}**\n"
         f"AI Score: {item['ai_score']:.1f}%\n"
+        f"Meta Score: {format_meta_score(item)}\n"
         f"Risk: {risk_label(item['risk_level'])}\n"
         f"Price: {item['price']:.6g}\n"
         f"4H Change: {item['change_24h']:+.2f}%\n"
@@ -151,6 +187,7 @@ def format_opportunity_rows(items):
             f"{index:>2}. {item['symbol']:<12}"
             f"{pct_str:>8}   "
             f"AI {item['ai_score']:>4.1f}%   "
+            f"M {float(item.get('meta_score', 50.0)):>4.1f}%   "
             f"{ai_label(item['ai_score'])}   "
             f"{risk_label(item['risk_level'])}"
         )
@@ -167,6 +204,7 @@ def format_scalper_rows(items):
         lines.append(
             f"{index:>2}. {item['symbol']:<12}"
             f"Vol {item['vol_pct']:>5.2f}%   "
+            f"M {float(item.get('meta_score', 50.0)):>4.1f}%   "
             f"{bias}"
         )
     return "```\n" + "\n".join(lines) + "\n```"
@@ -306,7 +344,7 @@ def build_btc_dominance_proxy(data_folder, symbols):
 
 
 def run_athena():
-    print("ATHENA v0.8.5 - The Sieve Engine starting...")
+    print("ATHENA v1.1 - Meta Filter Engine starting...")
 
     provider = BinanceProvider()
     hermes = Hermes()
@@ -373,6 +411,38 @@ def run_athena():
     if not results:
         raise RuntimeError("Tidak ada koin yang berhasil dianalisis. Report tidak dikirim.")
 
+    meta_summary = {
+        'enabled': META_FILTER_ENABLED,
+        'ready': False,
+        'source': 'disabled',
+        'training_rows': 0,
+        'positive_rate': 0.0,
+        'threshold': META_SCORE_THRESHOLD,
+        'auto_blacklist_count': 0,
+    }
+    if META_FILTER_ENABLED:
+        meta_filter = AthenaMetaFilter(MetaFilterConfig(
+            log_path=validator.log_path,
+            model_path=META_MODEL_PATH,
+            threshold=META_SCORE_THRESHOLD,
+            signal_score_bands=SIGNAL_SCORE_BANDS,
+        ))
+        results = meta_filter.annotate_items(results)
+        meta_summary = meta_filter.summary()
+        meta_summary['enabled'] = True
+        print(
+            "Meta filter: "
+            f"ready={meta_summary['ready']} "
+            f"source={meta_summary['source']} "
+            f"rows={meta_summary['training_rows']} "
+            f"blacklist={meta_summary['auto_blacklist_count']}"
+        )
+    else:
+        for item in results:
+            item['meta_score'] = 50.0
+            item['meta_filter_ready'] = False
+            item['is_auto_blacklisted'] = False
+
     high_confidence_results = [
         item for item in results
         if is_signal_candidate(item)
@@ -383,7 +453,7 @@ def run_athena():
     ]
     top_opps = sorted(
         discord_alert_results,
-        key=lambda x: x['ai_score'],
+        key=lambda x: (x.get('meta_score', 50.0), x['ai_score']),
         reverse=True,
     )[:TOP_OPPORTUNITY_LIMIT]
     scalp_list = sorted(
@@ -444,6 +514,11 @@ def run_athena():
                         "inline": True,
                     },
                     {
+                        "name": "Meta Filter",
+                        "value": format_meta_filter_summary(meta_summary),
+                        "inline": True,
+                    },
+                    {
                         "name": "Top Pick",
                         "value": format_top_pick(top_pick),
                         "inline": True,
@@ -459,7 +534,7 @@ def run_athena():
                         "inline": False,
                     },
                 ],
-                "footer": {"text": "ATHENA Engine v1.0 RC | Bands 68-75 or 80+ | Discord 70-75 or 80+ | LOW Risk + XGB"},
+                "footer": {"text": "ATHENA Engine v1.1 | Policy 68-70 or 72-75 | Meta >= 52 | Auto Blacklist + XGB"},
             },
         ],
     }
